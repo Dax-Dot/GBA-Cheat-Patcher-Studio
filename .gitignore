@@ -1,0 +1,30 @@
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# ROMs, saves, and patch outputs
+*.gba
+*.gb
+*.gbc
+*.sav
+*.srm
+*.rtc
+*.patch-log.txt
+*_test_pack/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.venv/
+.venv-build/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
