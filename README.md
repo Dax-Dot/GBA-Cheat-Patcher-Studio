@@ -1,33 +1,40 @@
-# GBA Cheat Patcher Studio v1.0
+# GBA Cheat Patcher Studio
 
-**Maintainer / Creator:** Dax-Dot
-A simple Windows desktop tool for patching supported CodeBreaker cheats into Game Boy Advance ROMs.
+**Maintainer:** Dax-Dot
 
-The app detects a loaded `.gba` ROM by CRC32, shows matching cheat entries, and creates a patched ROM using the currently supported direct-write CodeBreaker codes.
+GBA Cheat Patcher Studio is a Windows desktop tool for patching supported CodeBreaker cheats directly into Game Boy Advance ROM backups.
+
+The app detects a loaded `.gba` ROM by CRC32, shows matching cheat entries, lets you select supported cheats, and creates a patched ROM.
+
+## Download
+
+For most users, download the portable Windows ZIP from the latest release:
+
+- Go to **Releases**
+- Download `GBA-Cheat-Patcher-Studio-v1.0-Windows-Portable.zip`
+- Extract the ZIP
+- Run `GBA-Cheat-Patcher-Studio.exe`
+
+Do not move the EXE away from the `_internal` folder.
 
 ## Features
 
-- Automatic GBA ROM detection by CRC32.
-- ROM metadata matching using No-Intro.org data.
-- Cheat matching using GameHacking.org CodeBreaker data.
-- Supported cheat selection with checkboxes.
-- Code preview buttons for each listed cheat.
-- Manual CodeBreaker cheat entry for games or cheats not found in the database.
-- Light/Dark theme toggle.
-- Custom app icon, About dialog, and portable Windows EXE build script.
+- Automatic GBA ROM detection by CRC32
+- Cheat matching using bundled CodeBreaker data
+- ROM metadata matching using bundled No-Intro CRC data
+- Supported cheat selection with checkboxes
+- Code preview for listed cheats
+- Manual CodeBreaker cheat entry
+- Light and dark theme support
+- Portable Windows build from source
 
-## Current patching profile
+## Important Notice
 
-The app creates a patched ROM using the recommended profile:
+This tool does **not** include ROMs or BIOS files. Use only with legally obtained backups.
 
-- early hook 1
-- VBlank off
-- constant Always-ON writes
-- no visual trainer menu
+Compatibility is not guaranteed for every game. Some patched ROMs may crash, freeze, show glitches, or fail to apply cheats. If a patched ROM behaves badly, stop using it and try fewer cheats or another game.
 
-This profile works well for many games, but it is not guaranteed for every ROM.
-
-## Supported CodeBreaker types
+## Supported CodeBreaker Types
 
 Currently supported:
 
@@ -45,60 +52,65 @@ Not supported yet:
 - Codes starting with **0, 1, 9**: master / enabler / encryption / metadata
 - Codes containing **??**: user value required
 
-## Compatibility warning
+## Technical Notes
 
-The default hook profile is generic. Some games may crash, freeze, show visual glitches, or simply not apply cheats. If a patched ROM behaves badly, stop using that patched ROM and try fewer cheats or another game.
+The app currently uses this patching profile:
 
-Known technical limitations:
+- early hook 1
+- VBlank off
+- constant Always-ON writes
+- no visual trainer menu
+
+Known limitations:
 
 - The hook wrapper re-executes the 3 original instructions from a different address. If those instructions are PC-relative loads, the effective address may differ.
 - The hook wrapper uses the top 36 bytes of EWRAM (`0x0203FFDC-0x02040000`) as a register scratch area. ROMs that use this exact range for their own data may crash.
 
-## Data sources
+## Run From Source
 
-- Cheats: GameHacking.org
-- ROM metadata: No-Intro.org
-
-This tool does **not** include ROMs or BIOS files. Use only with legally obtained backups.
-
-See `ATTRIBUTIONS.md` for source notices, upstream links, and contact/removal request information.
-
-## Development note
-
-This project was created with the help of AI-assisted / vibe coding. Human testing, review, packaging, and release decisions are still required.
-
-## License
-
-Project source code is licensed under GPL-3.0-only. See `LICENSE`.
-
-Bundled data and third-party-origin material remain attributed to their respective upstream sources. If you are a rights holder or upstream maintainer and believe something is misattributed or should not be redistributed, please open a GitHub issue or contact the maintainer so it can be reviewed and fixed.
-
-## Requirements
+Requirements:
 
 - Windows 10/11 recommended
 - Python 3.8 to 3.13 recommended
 - No third-party packages required to run from source
-- Build only: PyInstaller from `requirements-build.txt`
-- Official Python for Windows from python.org is recommended for building, because it includes Tcl/Tk support required by the Tkinter GUI.
 
-## Run from source
+Run:
 
 ```bat
 run_gba_cheat_studio.bat
 ```
 
-## Build portable EXE
+## Build Portable EXE
+
+Requirements:
+
+- Official Python for Windows from python.org recommended
+- Internet connection for the first build
+
+Build:
 
 ```bat
 build_windows_exe.bat
 ```
 
-The build script creates a portable folder at:
+The build script creates a local `.venv-build` folder, installs the pinned PyInstaller version, and creates:
 
 ```text
 dist\GBA-Cheat-Patcher-Studio\
 ```
 
-Zip that folder for distribution. **Do not share only the EXE**; the bundled database and assets must be included.
+Zip that entire folder for distribution. Do not share only the EXE.
 
-The build script creates a local `.venv-build` folder and installs the pinned build dependency there. This keeps PyInstaller isolated from the user's global Python installation.
+## Data Sources
+
+- Cheats: GameHacking.org
+- ROM metadata: No-Intro.org
+
+See `ATTRIBUTIONS.md` for source notices, upstream links, and contact/removal request information.
+
+## License
+
+Project source code is licensed under GPL-3.0-only. See `LICENSE`.
+
+Bundled data and third-party-origin material remain attributed to their respective upstream sources.
+
