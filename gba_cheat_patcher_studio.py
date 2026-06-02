@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 """
-GBA Cheat Patcher Studio v1.0 GUI
+GBA Cheat Patcher Studio v1.1 GUI
 International English UI.
+
+v1.1:
+- Type 7 conditional cheats (beta), opt-in via a checkbox in the cheat list.
+- Cheat database deduplicated (identical-code cheats collapsed per game).
+- Fonts auto-select per platform (Segoe UI/Consolas on Windows,
+  Helvetica Neue/Menlo on macOS, DejaVu Sans/Mono on Linux) with safe
+  fallbacks, so the UI renders correctly when run from source on any OS.
 
 v1.0 public release:
 - The app starts with the Windows light/dark preference when available, and users can switch themes manually.
@@ -10,9 +17,6 @@ v1.0 public release:
 - open_output_folder is now safe on non-Windows platforms.
 - Patch operation runs on a background thread to keep the UI responsive.
 - Version strings unified across GUI and engine.
-- Fonts auto-select per platform (Segoe UI/Consolas on Windows,
-  Helvetica Neue/Menlo on macOS, DejaVu Sans/Mono on Linux) with safe
-  fallbacks, so the UI renders correctly when run from source on any OS.
 """
 from __future__ import annotations
 
@@ -31,7 +35,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import gba_patch_engine as engine
 
-APP_TITLE = "GBA Cheat Patcher Studio v1.0"
+APP_TITLE = "GBA Cheat Patcher Studio v1.1"
 CODE_RE = re.compile(r"^\s*([0-9A-Fa-f]{8})\s+([0-9A-Fa-f]{4})\s*$")
 HEXISH_RE = re.compile(r"^[0-9A-Fa-f?]{8}\s+[0-9A-Fa-f?]{4}$")
 
@@ -422,7 +426,7 @@ class CheatPatcherGUI(tk.Tk):
         title_area = ttk.Frame(top)
         title_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ttk.Label(title_area, text="GBA Cheat Patcher Studio", font=self.heading_font).pack(anchor="w")
-        ttk.Label(title_area, text="Version 1.0", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(title_area, text="Version 1.1", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
 
         body = (
             "A small desktop tool for patching supported CodeBreaker cheats "
@@ -1219,7 +1223,7 @@ class CheatPatcherGUI(tk.Tk):
         def _do_patch():
             log: List[str]=[]
             try:
-                engine.log_print(log, f"{engine.APP} v1.0 GUI")
+                engine.log_print(log, f"{engine.APP} v{engine.VERSION} GUI")
                 engine.log_print(log, f"Created: {datetime.now().isoformat(timespec='seconds')}")
                 engine.log_print(log, source_label)
                 engine.log_print(log, f"Selected GUI cheat numbers: {ids_label}")

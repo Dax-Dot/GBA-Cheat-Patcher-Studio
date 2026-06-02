@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 """
-GBA Cheat Patcher Studio v1.0 - Patch Engine
+GBA Cheat Patcher Studio v1.1 - Patch Engine
 
 Applies supported CodeBreaker cheats (types 3, 8, 2, 6) to GBA ROMs by
 injecting a minimal Always-ON RAM-write engine via an ARM hook.
@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 APP = "GBA Cheat Patcher Studio"
-VERSION = "1.0"
+VERSION = "1.1"
 SUPPORTED_TYPES = {"3", "8", "2", "6"}
 GBA_ROM_BASE = 0x08000000
 MIN_SAFE_HOOK_OFFSET = 0x1000
@@ -1059,7 +1059,7 @@ def interactive(args: argparse.Namespace) -> int:
         print("\nCompatibility warning:")
         print(f"- {warn}")
 
-    print("\nDefault v1.0 output uses recommended profile:")
+    print("\nDefault v1.1 output uses recommended profile:")
     print("- early hook 1")
     print("- VBlank off")
     print("- constant Always-ON writes")
