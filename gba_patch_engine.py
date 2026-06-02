@@ -334,9 +334,197 @@ def append_refill_if_zero(out: List[int], line: CheatLine) -> None:
     # Caller should avoid sending type 2/6 here, but keep safe fallback.
     raise ValueError(f"refill_if_zero is not supported for type {t}")
 
+# --- Type 7 conditional support (beta) ---------------------------------------
+#
+# CodeBreaker conditional families, per GBATEK:
+#   7aaaaaaa yyyy : IF [aaaaaaa] == yyyy THEN (next code)
+#   Aaaaaaaa yyyy : IF [aaaaaaa] <> yyyy THEN (next code)
+#   Baaaaaaa yyyy : IF [aaaaaaa]  > yyyy THEN (next code)  (signed)
+#   Caaaaaaa yyyy : IF [aaaaaaa]  < yyyy THEN (next code)  (signed)
+#
+# This engine implements ONLY the safe 2-line pattern:
+#   line 1: type 7 (IF equal) condition
+#   line 2: a single already-supported write of type 3/8/2/6
+#
+# The condition is read as a 16-bit halfword from the target address, matching
+# the most common CodeBreaker usage where the conditional value is yyyy (16-bit).
+# If the comparison fails, the conditional write is skipped this frame; other
+# (unconditional) cheats in the same engine are unaffected.
+CONDITIONAL_TYPES = {"7"}
+
+
+def _arm_conditional_write_words(cond: CheatLine, write: CheatLine) -> List[int]:
+    """Emit ARM that performs `write` only if [cond.address] (u16) == cond.value.
+
+    Layout (PC-relative literals placed right after the block, skipped by a branch):
+        ldr   r1, [pc, #..]      ; r1 = cond addr
+        ldrh  r0, [r1]           ; r0 = current value
+        ldr   r2, [pc, #..]      ; r2 = expected value
+        cmp   r0, r2
+        bne   <skip writes>      ; condition false -> skip
+        <inline write to write.address>
+      skip:
+        b     <past literals>
+        .word cond_addr
+        .word cond_value
+        (.word write literals as needed)
+
+    To keep things simple and robust we build the inner write body first, then
+    compute the conditional branch offset over it.
+    """
+    cond_addr = cond.address & 0x0FFFFFFF
+    cond_val = cond.value & 0xFFFF
+    t = write.type.upper()
+    waddr = write.address & 0x0FFFFFFF
+    wval = write.value & 0xFFFF
+
+    # Build the write body as self-contained words (same shapes as the constant
+    # writers below, but always using PC-relative literals so the body length is
+    # deterministic and easy to branch over).
+    body: List[int] = []
+    if t == "3":
+        body = _arm_write8_pcrel(waddr, wval)
+    elif t == "8":
+        body = _arm_write16_pcrel(waddr, wval)
+    elif t in ("2", "6"):
+        body = _arm_writelogic16_pcrel(waddr, wval, is_or=(t == "2"))
+    else:
+        raise ValueError(f"Type {t} not allowed as conditional write target")
+
+    n_body = len(body)
+    # Conditional prologue. Literals (cond_addr, cond_val) live AFTER everything,
+    # reached via a final unconditional branch.
+    # Words:
+    #   0: ldr r1, [pc, #off_addr]
+    #   1: ldrh r0, [r1]
+    #   2: ldr r2, [pc, #off_val]
+    #   3: cmp r0, r2
+    #   4: bne skip            (skip the body -> jump to word 5+n_body)
+    #   5 .. 5+n_body-1: body
+    #   5+n_body: b past_literals
+    #   6+n_body: .word cond_addr
+    #   7+n_body: .word cond_val
+    out: List[int] = [0] * (8 + n_body)
+    addr_literal_index = 6 + n_body
+    val_literal_index = 7 + n_body
+
+    # ldr r1, [pc, #imm] ; pc = (index0+2)*4 base. imm = (addr_literal_index-0-2)*4
+    out[0] = 0xE59F1000 | (((addr_literal_index - 0 - 2) * 4) & 0xFFF)
+    out[1] = 0xE1D100B0          # ldrh r0, [r1]
+    out[2] = 0xE59F2000 | (((val_literal_index - 2 - 2) * 4) & 0xFFF)
+    out[3] = 0xE1500002          # cmp r0, r2
+    # bne skip: branch to word (5 + n_body). From word 4: target_words = (5+n_body)-(4+2)
+    out[4] = 0x1A000000 | (((5 + n_body) - (4 + 2)) & 0x00FFFFFF)
+    for k, w in enumerate(body):
+        out[5 + k] = w
+    # b past_literals: from word (5+n_body) jump to word (8+n_body)
+    branch_word = 5 + n_body
+    out[branch_word] = 0xEA000000 | (((8 + n_body) - (branch_word + 2)) & 0x00FFFFFF)
+    out[addr_literal_index] = cond_addr
+    out[val_literal_index] = cond_val
+    return out
+
+
+def _arm_write8_pcrel(addr: int, val: int) -> List[int]:
+    """Self-contained 8-bit write using only PC-relative literals.
+
+    Layout (word indices):
+        0: mov  r0, #val
+        1: ldr  r1, [pc, #imm]   -> word4 (addr) ; imm=(4-1-2)*4=4
+        2: strb r0, [r1]
+        3: b    +0               -> word4..end is data; jump to word4? no: jump past literal -> word5
+        4: .word addr
+    """
+    return [
+        0xE3A00000 | (val & 0xFF),
+        0xE59F1000 | (((4 - 1 - 2) * 4) & 0xFFF),  # ldr r1,[pc,#imm] -> word4
+        0xE5C10000,                                # strb r0, [r1]
+        0xEA000000 | (((5 - 3 - 2) * 4 // 4) & 0x00FFFFFF),  # b -> word5 (past literal)
+        addr & 0x0FFFFFFF,
+    ]
+
+
+def _arm_write16_pcrel(addr: int, val: int) -> List[int]:
+    """Self-contained 16-bit write using only PC-relative literals.
+
+    Layout (word indices):
+        0: ldr  r0, [pc, #imm]   -> word4 (val)  ; imm=(4-0-2)*4=8
+        1: ldr  r1, [pc, #imm]   -> word5 (addr) ; imm=(5-1-2)*4=8
+        2: strh r0, [r1]
+        3: b    -> word6 (past both literals)
+        4: .word val
+        5: .word addr
+    """
+    return [
+        0xE59F0000 | (((4 - 0 - 2) * 4) & 0xFFF),  # ldr r0,[pc,#8] -> val
+        0xE59F1000 | (((5 - 1 - 2) * 4) & 0xFFF),  # ldr r1,[pc,#8] -> addr
+        0xE1C100B0,                                # strh r0, [r1]
+        0xEA000000 | ((6 - 3 - 2) & 0x00FFFFFF),   # b -> word6
+        val & 0xFFFF,
+        addr & 0x0FFFFFFF,
+    ]
+
+
+def _arm_writelogic16_pcrel(addr: int, val: int, is_or: bool) -> List[int]:
+    """Self-contained 16-bit OR/AND using only PC-relative literals.
+
+    Layout (word indices):
+        0: ldr  r1, [pc, #imm]   -> word6 (addr) ; imm=(6-0-2)*4=16=0x10
+        1: ldr  r2, [pc, #imm]   -> word7 (val)  ; imm=(7-1-2)*4=16=0x10
+        2: ldrh r0, [r1]
+        3: orr/and r0, r0, r2
+        4: strh r0, [r1]
+        5: b    -> word8 (past both literals)
+        6: .word addr
+        7: .word val
+    """
+    op = 0xE1800002 if is_or else 0xE0000002  # orr/and r0, r0, r2
+    return [
+        0xE59F1000 | (((6 - 0 - 2) * 4) & 0xFFF),  # ldr r1,[pc,#0x10] -> addr
+        0xE59F2000 | (((7 - 1 - 2) * 4) & 0xFFF),  # ldr r2,[pc,#0x10] -> val
+        0xE1D100B0,                                # ldrh r0, [r1]
+        op,
+        0xE1C100B0,                                # strh r0, [r1]
+        0xEA000000 | ((8 - 5 - 2) & 0x00FFFFFF),   # b -> word8
+        addr & 0x0FFFFFFF,
+        val & 0xFFFF,
+    ]
+
+
+def split_conditional_pair(cheat: SelectedCheat) -> Optional[Tuple[CheatLine, CheatLine]]:
+    """Return (cond, write) if this cheat is exactly the safe 2-line type-7 pair.
+
+    Safe pattern (per the recommended first implementation):
+      - exactly 2 lines
+      - line 1 type == "7"
+      - line 2 type in {3, 8, 2, 6}
+    Otherwise return None (caller treats it as unsupported for conditional mode).
+    """
+    if len(cheat.lines) != 2:
+        return None
+    cond, write = cheat.lines[0], cheat.lines[1]
+    if cond.type.upper() != "7":
+        return None
+    if write.type.upper() not in SUPPORTED_TYPES:
+        return None
+    return cond, write
+
+
 def convert_simple_cheats_to_arm(cheats: List[SelectedCheat], log: List[str], behavior_profile: str = "auto") -> List[int]:
     out: List[int] = []
     for cheat in cheats:
+        # Type 7 conditional pair (beta). Handled as a whole cheat, before the
+        # per-line constant-write logic below. Only the safe 2-line pattern
+        # (7 + {3,8,2,6}) is accepted; anything else falls through unchanged.
+        pair = split_conditional_pair(cheat)
+        if pair is not None:
+            cond, write = pair
+            log_print(log, f"[INFO] Cheat: {cheat.title}")
+            log_print(log, "  [INFO] Behavior: conditional (type 7, beta)")
+            log_print(log, f"  [OK] {cond.raw}: IF [0x{cond.address & 0x0FFFFFFF:08X}] == 0x{cond.value & 0xFFFF:04X}")
+            log_print(log, f"  [OK] {write.raw}: THEN apply type {write.type.upper()}; {write.message}")
+            out.extend(_arm_conditional_write_words(cond, write))
+            continue
         behavior = classify_cheat_behavior(cheat.title, cheat.lines, behavior_profile)
         log_print(log, f"[INFO] Cheat: {cheat.title}")
         log_print(log, f"  [INFO] Behavior: {behavior}")
@@ -429,6 +617,71 @@ def selectable_cheats(game: dict) -> List[Tuple[int, dict]]:
         if lines and len(lines) == ch.get("total_code_lines", len(lines)):
             items.append((idx, ch))
     return items
+
+
+def parse_any_line_obj(obj: dict) -> Optional[CheatLine]:
+    """Parse a line regardless of status (used for conditional pairs).
+
+    Unlike parse_cheat_line_obj, this does not require status == simple_supported,
+    so it can read the type-7 condition line. It still requires a parseable
+    address/value and a known type character.
+    """
+    t = str(obj.get("type", "")).upper()
+    if not t:
+        return None
+    try:
+        address = int(str(obj["address"]), 16)
+        value = int(str(obj["value"]), 16)
+    except Exception:
+        return None
+    return CheatLine(
+        raw=str(obj.get("raw", f"{address:08X} {value:04X}")),
+        address=address,
+        value=value,
+        type=t,
+        message=str(obj.get("message", "")),
+    )
+
+
+def conditional_cheats(game: dict) -> List[Tuple[int, dict]]:
+    """Return (db_index, cheat) for cheats that are the safe 2-line type-7 pair.
+
+    Safe pattern: exactly two lines, line 1 type 7, line 2 type in {3,8,2,6}.
+    These are NOT returned by selectable_cheats(); they are offered separately
+    as an opt-in beta feature so the stable simple-write path stays untouched.
+    """
+    items: List[Tuple[int, dict]] = []
+    for idx, ch in enumerate(game.get("cheats", [])):
+        raw_lines = ch.get("lines", [])
+        if len(raw_lines) != 2:
+            continue
+        cond = parse_any_line_obj(raw_lines[0])
+        write = parse_any_line_obj(raw_lines[1])
+        if cond is None or write is None:
+            continue
+        if cond.type.upper() != "7":
+            continue
+        if write.type.upper() not in SUPPORTED_TYPES:
+            continue
+        items.append((idx, ch))
+    return items
+
+
+def make_selected_conditional(game: dict, cheat_indices: List[int]) -> List[SelectedCheat]:
+    """Build SelectedCheat objects for conditional pairs by db index."""
+    selected: List[SelectedCheat] = []
+    cheats = game.get("cheats", [])
+    for idx in cheat_indices:
+        if idx < 0 or idx >= len(cheats):
+            raise ValueError(f"Cheat index out of range: {idx}")
+        ch = cheats[idx]
+        raw_lines = ch.get("lines", [])
+        cond = parse_any_line_obj(raw_lines[0]) if len(raw_lines) >= 1 else None
+        write = parse_any_line_obj(raw_lines[1]) if len(raw_lines) >= 2 else None
+        if cond is None or write is None or cond.type.upper() != "7" or write.type.upper() not in SUPPORTED_TYPES:
+            raise ValueError(f"Cheat is not a supported conditional pair: #{idx} {ch.get('title')}")
+        selected.append(SelectedCheat(title=ch.get("title", f"Cheat {idx}"), lines=[cond, write]))
+    return selected
 
 
 def make_selected(game: dict, cheat_indices: List[int]) -> List[SelectedCheat]:

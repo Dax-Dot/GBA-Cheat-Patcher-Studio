@@ -10,6 +10,9 @@ v1.0 public release:
 - open_output_folder is now safe on non-Windows platforms.
 - Patch operation runs on a background thread to keep the UI responsive.
 - Version strings unified across GUI and engine.
+- Fonts auto-select per platform (Segoe UI/Consolas on Windows,
+  Helvetica Neue/Menlo on macOS, DejaVu Sans/Mono on Linux) with safe
+  fallbacks, so the UI renders correctly when run from source on any OS.
 """
 from __future__ import annotations
 
@@ -76,6 +79,52 @@ def windows_prefers_dark_mode() -> bool:
             return int(value) == 0
     except Exception:
         return False
+
+
+# Default UI / monospace font per platform. Each tuple lists candidates in
+# preference order; the first one actually installed (per Tk) is used, with a
+# final generic fallback that Tk always resolves. This keeps the app looking
+# native on Windows, macOS and Linux without bundling any font.
+_FONT_CANDIDATES = {
+    "win32":  (["Segoe UI", "Tahoma"], ["Consolas", "Courier New"]),
+    "darwin": (["Helvetica Neue", "Helvetica"], ["Menlo", "Monaco"]),
+    "linux":  (["DejaVu Sans", "Noto Sans", "Liberation Sans"],
+               ["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono"]),
+}
+
+
+def _platform_key() -> str:
+    if sys.platform == "win32":
+        return "win32"
+    if sys.platform == "darwin":
+        return "darwin"
+    return "linux"
+
+
+def resolve_platform_fonts(root) -> tuple:
+    """Return (ui_family, mono_family) using fonts actually available in Tk.
+
+    Falls back to Tk's generic families ('TkDefaultFont'/'TkFixedFont' names
+    resolve everywhere) if none of the preferred candidates are installed,
+    so text never renders with a broken/missing font on Linux or macOS.
+    """
+    ui_list, mono_list = _FONT_CANDIDATES[_platform_key()]
+    try:
+        import tkinter.font as tkfont
+        available = set(tkfont.families(root))
+    except Exception:
+        available = set()
+
+    def pick(candidates, generic):
+        for name in candidates:
+            if name in available:
+                return name
+        # Last resort: a family Tk guarantees to resolve on every platform.
+        return generic
+
+    ui = pick(ui_list, "TkDefaultFont")
+    mono = pick(mono_list, "TkFixedFont")
+    return ui, mono
 
 
 LIGHT_COLORS = {
@@ -263,6 +312,9 @@ class CheatPatcherGUI(tk.Tk):
         self.current_cheat_game: Optional[dict] = None
         self.current_nointro_info: Optional[dict] = None
         self.cheat_items: List[Tuple[int, dict, tk.BooleanVar, int]] = []
+        # Beta: include type-7 conditional pairs in the auto list. Off by default
+        # so the stable behavior is unchanged unless the user opts in.
+        self.include_conditional = tk.BooleanVar(value=False)
 
         self.rom_path_var = tk.StringVar()
         self.output_path_var = tk.StringVar()
@@ -288,11 +340,14 @@ class CheatPatcherGUI(tk.Tk):
         self._load_bundled_databases()
 
     def _setup_fonts_and_scaling(self):
-        """Use a modern Windows-friendly font and a sane scaling baseline."""
-        self.base_font = ("Segoe UI", 10)
-        self.heading_font = ("Segoe UI", 17, "bold")
-        self.subheading_font = ("Segoe UI", 11, "bold")
-        self.mono_font = ("Consolas", 10)
+        """Use the native system font on each platform, with safe fallbacks."""
+        ui, mono = resolve_platform_fonts(self)
+        self.ui_family = ui
+        self.mono_family = mono
+        self.base_font = (ui, 10)
+        self.heading_font = (ui, 17, "bold")
+        self.subheading_font = (ui, 11, "bold")
+        self.mono_font = (mono, 10)
         try:
             # Let Tk use the display DPI, but keep the baseline from becoming tiny.
             current = float(self.tk.call("tk", "scaling"))
@@ -318,9 +373,9 @@ class CheatPatcherGUI(tk.Tk):
         style.configure("TEntry", fieldbackground=c["field"], foreground=c["text"], bordercolor=c["border"], lightcolor=c["border"], darkcolor=c["border"])
         style.configure("App.TButton", padding=(13, 8), borderwidth=2, relief="solid", background=c["button"], foreground=c["text"], font=self.base_font, focusthickness=2, focuscolor=c["border"])
         style.map("App.TButton", background=[("active", c["button_active"]), ("pressed", c["button_active"])] )
-        style.configure("Tiny.TButton", padding=(8, 4), borderwidth=2, relief="solid", background=c["button"], foreground=c["text"], font=("Segoe UI", 9), focusthickness=1, focuscolor=c["border"])
+        style.configure("Tiny.TButton", padding=(8, 4), borderwidth=2, relief="solid", background=c["button"], foreground=c["text"], font=(self.ui_family, 9), focusthickness=1, focuscolor=c["border"])
         style.map("Tiny.TButton", background=[("active", c["button_active"]), ("pressed", c["button_active"])] )
-        style.configure("Accent.TButton", padding=(18, 9), borderwidth=2, relief="solid", background=c["accent"], foreground=c["accent_text"], font=("Segoe UI", 10, "bold"), focusthickness=2, focuscolor=c["accent"])
+        style.configure("Accent.TButton", padding=(18, 9), borderwidth=2, relief="solid", background=c["accent"], foreground=c["accent_text"], font=(self.ui_family, 10, "bold"), focusthickness=2, focuscolor=c["accent"])
         style.map("Accent.TButton", background=[("active", c["accent_active"]), ("pressed", c["accent_active"])] )
         style.configure("Vertical.TScrollbar", background=c["button"], troughcolor=c["bg"], bordercolor=c["border"])
 
@@ -462,7 +517,7 @@ class CheatPatcherGUI(tk.Tk):
             width=1,
             height=1,
             command=lambda b=None: None,
-            font=("Segoe UI", 8, "bold"),
+            font=(self.ui_family, 8, "bold"),
             relief="solid",
             bd=1,
             bg=c["button"],
@@ -488,7 +543,7 @@ class CheatPatcherGUI(tk.Tk):
         box = tk.Label(
             wrap,
             text="☑" if variable.get() else "☐",
-            font=("Segoe UI Symbol", 18),
+            font=(self.ui_family, 18),
             width=2,
             anchor="center",
             bg=c["panel"],
@@ -498,7 +553,7 @@ class CheatPatcherGUI(tk.Tk):
         label = tk.Label(
             wrap,
             text=text,
-            font=("Segoe UI", 11),
+            font=(self.ui_family, 11),
             anchor="w",
             bg=c["panel"],
             fg=c["text"],
@@ -564,7 +619,15 @@ class CheatPatcherGUI(tk.Tk):
         tools = ttk.Frame(cheats_frame); tools.pack(fill=tk.X, padx=6, pady=6)
         self.button(tools, "Select all", self.select_all_cheats).pack(side=tk.LEFT, padx=2)
         self.button(tools, "Clear", self.clear_cheats).pack(side=tk.LEFT, padx=2)
-        ttk.Label(tools, text="Only direct CodeBreaker codes starting with 3, 8, 2 or 6 are selectable.").pack(side=tk.LEFT, padx=12)
+        cond_cb = ttk.Checkbutton(
+            tools,
+            text="Include conditional cheats (Type 7, beta)",
+            variable=self.include_conditional,
+            command=self._on_toggle_conditional,
+            style="TCheckbutton",
+        )
+        cond_cb.pack(side=tk.LEFT, padx=12)
+        ttk.Label(tools, text="Direct codes (3, 8, 2, 6) are always selectable.").pack(side=tk.LEFT, padx=12)
         self.cheat_canvas = tk.Canvas(cheats_frame, highlightthickness=0, bg=self.colors["panel"])
         self.cheat_scroll = ttk.Scrollbar(cheats_frame, orient=tk.VERTICAL, command=self.cheat_canvas.yview)
         self.cheat_inner = ttk.Frame(self.cheat_canvas)
@@ -879,11 +942,11 @@ class CheatPatcherGUI(tk.Tk):
         def copy_codes():
             self.clipboard_clear()
             self.clipboard_append(code_text)
-        copy_btn = tk.Button(btn_row, text="Copy", command=copy_codes, font=("Segoe UI", 9), relief="solid", bd=1,
+        copy_btn = tk.Button(btn_row, text="Copy", command=copy_codes, font=(self.ui_family, 9), relief="solid", bd=1,
                              bg=self.colors["button"], fg=self.colors["text"], activebackground=self.colors["button_active"],
                              activeforeground=self.colors["text"], padx=8, pady=2)
         copy_btn.pack(side=tk.LEFT)
-        close_btn = tk.Button(btn_row, text="×", command=self.close_code_popup, font=("Segoe UI", 9, "bold"), relief="solid", bd=1,
+        close_btn = tk.Button(btn_row, text="×", command=self.close_code_popup, font=(self.ui_family, 9, "bold"), relief="solid", bd=1,
                               bg=self.colors["button"], fg=self.colors["text"], activebackground=self.colors["button_active"],
                               activeforeground=self.colors["text"], padx=6, pady=2)
         close_btn.pack(side=tk.RIGHT)
@@ -922,12 +985,15 @@ class CheatPatcherGUI(tk.Tk):
             ttk.Label(self.cheat_inner, text="No CRC-matching supported cheats found for this ROM. Use Manual Cheats if needed.").pack(anchor="w", padx=6, pady=6)
             return
         items=engine.selectable_cheats(game)
-        if not items:
+        cond_items = engine.conditional_cheats(game) if self.include_conditional.get() else []
+        if not items and not cond_items:
             ttk.Label(self.cheat_inner, text="This ROM matched the database, but it has no supported direct CodeBreaker cheats.").pack(anchor="w", padx=6, pady=6)
             return
-        for display_no,(db_idx,ch) in enumerate(items, start=1):
+        display_no = 0
+        for (db_idx,ch) in items:
+            display_no += 1
             var=tk.BooleanVar(value=False)
-            self.cheat_items.append((db_idx,ch,var,display_no))
+            self.cheat_items.append((db_idx,ch,var,display_no,False))
             title=ch.get('title', f'Cheat {display_no}')
             line_count=ch.get('simple_supported_lines', ch.get('total_code_lines',0))
             text=f"[{display_no}] {title}  ({line_count} line(s))"
@@ -940,19 +1006,39 @@ class CheatPatcherGUI(tk.Tk):
             self._bind_cheat_row_mousewheel(row)
             self._bind_cheat_row_mousewheel(cb)
             self._bind_cheat_row_mousewheel(info_btn)
+        for (db_idx,ch) in cond_items:
+            display_no += 1
+            var=tk.BooleanVar(value=False)
+            self.cheat_items.append((db_idx,ch,var,display_no,True))
+            title=ch.get('title', f'Cheat {display_no}')
+            text=f"[{display_no}] {title}  (conditional, beta)"
+            row = ttk.Frame(self.cheat_inner)
+            row.pack(anchor="w", fill=tk.X, padx=6, pady=2)
+            cb = self.make_cheat_checkbox(row, text, var)
+            cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            info_btn = self.compact_info_button(row, ch)
+            info_btn.pack(side=tk.RIGHT, padx=(3, 2), ipadx=0, ipady=0)
+            self._bind_cheat_row_mousewheel(row)
+            self._bind_cheat_row_mousewheel(cb)
+            self._bind_cheat_row_mousewheel(info_btn)
+
+    def _on_toggle_conditional(self):
+        # Re-render the list to add/remove conditional entries; keep current game.
+        self.populate_cheats(self.current_cheat_game)
+        self.update_output_name()
 
     def on_auto_cheat_changed(self):
-        if any(var.get() for _,_,var,_ in self.cheat_items):
+        if any(var.get() for _,_,var,_,_ in self.cheat_items):
             self.use_manual_cheats = False
         self.update_output_name()
 
     def select_all_cheats(self):
         self.use_manual_cheats = False
-        for _,_,var,_ in self.cheat_items: var.set(True)
+        for _,_,var,_,_ in self.cheat_items: var.set(True)
         self.update_output_name()
 
     def clear_cheats(self):
-        for _,_,var,_ in self.cheat_items: var.set(False)
+        for _,_,var,_,_ in self.cheat_items: var.set(False)
         self.update_output_name()
 
     def open_manual_dialog(self):
@@ -1058,10 +1144,23 @@ class CheatPatcherGUI(tk.Tk):
         return "manual" if self.use_manual_cheats else "auto"
 
     def selected_display_ids(self) -> List[int]:
-        return [display_no for _,_,var,display_no in self.cheat_items if var.get()]
+        return [display_no for _,_,var,display_no,_ in self.cheat_items if var.get()]
 
     def selected_db_indices(self) -> List[int]:
-        return [db_idx for db_idx,_,var,_ in self.cheat_items if var.get()]
+        return [db_idx for db_idx,_,var,_,_ in self.cheat_items if var.get()]
+
+    def _selected_split(self) -> Tuple[List[int], List[int]]:
+        """Return (simple_db_indices, conditional_db_indices) for checked items."""
+        simple_ids: List[int] = []
+        cond_ids: List[int] = []
+        for db_idx,_,var,_,is_cond in self.cheat_items:
+            if not var.get():
+                continue
+            if is_cond:
+                cond_ids.append(db_idx)
+            else:
+                simple_ids.append(db_idx)
+        return simple_ids, cond_ids
 
     def update_output_name(self):
         raw=self.rom_path_var.get().strip().strip('"')
@@ -1086,9 +1185,16 @@ class CheatPatcherGUI(tk.Tk):
             return analysis.selected, "Manual CodeBreaker input", ",".join(map(str,ids))
         if not self.current_cheat_game:
             raise ValueError("No CRC-matching cheat database entry is loaded for this ROM. Use the Manual Cheats button if needed.")
-        db_ids=self.selected_db_indices(); display_ids=self.selected_display_ids()
-        if not db_ids: raise ValueError("Select at least one supported cheat.")
-        return engine.make_selected(self.current_cheat_game, db_ids), f"CRC DB game: {self.current_cheat_game.get('title')} [{self.current_cheat_game.get('crc32')}]", ",".join(map(str,display_ids))
+        simple_ids, cond_ids = self._selected_split()
+        display_ids=self.selected_display_ids()
+        if not simple_ids and not cond_ids:
+            raise ValueError("Select at least one supported cheat.")
+        selected: List[engine.SelectedCheat] = []
+        if simple_ids:
+            selected += engine.make_selected(self.current_cheat_game, simple_ids)
+        if cond_ids:
+            selected += engine.make_selected_conditional(self.current_cheat_game, cond_ids)
+        return selected, f"CRC DB game: {self.current_cheat_game.get('title')} [{self.current_cheat_game.get('crc32')}]", ",".join(map(str,display_ids))
 
     def patch_rom(self):
         rom=Path(self.rom_path_var.get().strip().strip('"')).expanduser()
