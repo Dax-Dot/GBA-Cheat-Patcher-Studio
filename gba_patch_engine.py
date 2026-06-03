@@ -3,13 +3,16 @@
 """
 GBA Cheat Patcher Studio v1.1 - Patch Engine
 
-Applies supported CodeBreaker cheats (types 3, 8, 2, 6) to GBA ROMs by
-injecting a minimal Always-ON RAM-write engine via an ARM hook.
+Applies supported CodeBreaker cheats to GBA ROMs by injecting a minimal
+Always-ON RAM-write engine via an ARM hook.
+
+Supported types:
+- 3 (8-bit write), 8 (16-bit write), 2 (16-bit OR), 6 (16-bit AND)
+- 7 (conditional IF equal, 2-line pair with a supported write — beta)
 
 Not a full GBAATM replacement:
 - no trainer menu, no YES/NO toggles
-- only simple types 3, 8, 2, 6 are supported
-- recommended mode: early hook 1, VBlank off, constant Always-ON writes
+- recommended mode: hook 1, VBlank off, constant Always-ON writes
 """
 from __future__ import annotations
 

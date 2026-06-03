@@ -26,10 +26,11 @@ The portable EXE is Windows-only. On macOS or Linux, run from source instead.
 - Automatic GBA ROM detection by CRC32
 - Cheat matching using bundled CodeBreaker data
 - ROM metadata matching using bundled No-Intro CRC data
-- Supported cheat selection with checkboxes
+- Supported cheat selection with live selection counter
 - Type 7 conditional cheats (beta), opt-in
 - Code preview for listed cheats
-- Manual CodeBreaker cheat entry
+- Manual CodeBreaker cheat entry with right-click paste support
+- Type 7 conditional cheats also supported in manual entry
 - Light and dark theme support
 - Native system fonts on Windows, macOS and Linux
 - Portable Windows build from source
@@ -39,6 +40,13 @@ The portable EXE is Windows-only. On macOS or Linux, run from source instead.
 This tool does **not** include ROMs or BIOS files. Use only with legally obtained backups.
 
 Compatibility is not guaranteed for every game. Some patched ROMs may crash, freeze, show glitches, or fail to apply cheats. If a patched ROM behaves badly, stop using it and try fewer cheats or another game.
+
+### Compatibility with IPS ROM hacks
+
+ROM hacks (`.ips` files) can be combined with this tool, but order matters:
+
+- ✅ **IPS patch first, then cheats** — works reliably. Since the IPS patch changes the CRC, use Manual Cheats to apply codes after patching.
+- ❌ **Cheats first, then IPS patch** — will likely break the ROM. The IPS patch can overwrite the hook this app injected.
 
 ## Supported CodeBreaker Types
 
@@ -55,7 +63,7 @@ The app can also apply a safe subset of **Type 7** conditional codes, disabled b
 
 A supported Type 7 cheat is a two-line pair: one Type 7 condition line (`IF [address] == value`) followed by one already-supported write line (type 3, 8, 2 or 6). When the condition is true, the write is applied; otherwise it is skipped. Anything more complex (chained conditions, button activators such as `74000130`, blocks larger than two lines, or conditions over unsupported code types) is intentionally left out.
 
-To enable it, tick **"Include conditional cheats (Type 7, beta)"** in the cheat list after a ROM is detected. Because it is beta, always test the patched ROM in an emulator before relying on it.
+To enable it in the cheat list, tick **"Include conditional cheats (Type 7, beta)"** after a ROM is detected. Type 7 pairs can also be entered directly in **Manual Cheats** — paste the two lines together under a title and validate as normal. Because it is beta, always test the patched ROM in an emulator before relying on it.
 
 Not supported yet:
 
@@ -129,7 +137,13 @@ Zip that entire folder for distribution. Do not share only the EXE.
 
 The bundled cheat database is deduplicated: cheats that share an identical code within the same game are collapsed to a single entry, keeping the most descriptive title. Cheats with different codes (even if similarly named) are preserved.
 
-See `ATTRIBUTIONS.md` for source notices, upstream links, and contact/removal request information.
+## Credits & Inspiration
+
+- **[GBAATM-Rebirth](https://github.com/Mte90/GBAATM-Rebirth)** by Mte90 — a multiplatform refactoring of the original GBAATM tool (2011) by Cracker. One of the main inspirations for this project.
+- Cheat data sourced from [GameHacking.org](https://gamehacking.org)
+- ROM metadata sourced from [No-Intro](https://no-intro.org)
+
+See `ATTRIBUTIONS.md` for full source notices, upstream links, and contact/removal request information.
 
 ## License
 

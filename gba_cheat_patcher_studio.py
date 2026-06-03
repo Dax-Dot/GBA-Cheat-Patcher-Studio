@@ -196,13 +196,50 @@ def unsupported_reason(type_char: str) -> str:
         return "Code starts with 4 — slide/repeated-write code. Not supported yet."
     if type_char == "5":
         return "Code starts with 5 — super/multi-line block code. Not supported yet."
-    if type_char in {"7", "A", "B", "C", "F"}:
+    if type_char == "7":
+        return ("Code starts with 7 — conditional. Supported only as a 2-line pair: "
+                "a Type 7 line followed by one supported write (3, 8, 2 or 6).")
+    if type_char in {"A", "B", "C", "F"}:
         return f"Code starts with {type_char} — conditional code. It depends on another line and is not supported yet."
     if type_char == "D":
         return "Code starts with D — button activator code. Not supported yet."
     if type_char in {"0", "1", "9"}:
         return f"Code starts with {type_char} — master/enabler/encryption/metadata. Not used as a normal cheat."
     return f"Code starts with {type_char} — unsupported CodeBreaker type."
+
+
+def build_manual_code_entry(lineno: int, line: str, first: int, value: int) -> dict:
+    """Build a parsed code entry. Handles direct writes AND type-7 condition lines.
+
+    A type-7 line is parsed as a valid 'condition' entry here; whether it forms a
+    supported cheat is decided at block level (it must be followed by exactly one
+    supported write line).
+    """
+    type_char = f"{first:08X}"[0]
+    normalized = f"{first:08X} {value:04X}".upper()
+    if type_char == "7":
+        addr = first & 0x0FFFFFFF
+        cond_line = engine.CheatLine(
+            raw=normalized, address=first, value=value, type="7",
+            message=f"IF [0x{addr:08X}] == 0x{value & 0xFFFF:04X} then apply next line",
+        )
+        return {
+            "kind": "code", "lineno": lineno, "raw": line, "normalized": normalized,
+            "type": "7", "supported": False, "is_condition": True,
+            "message": cond_line.message,
+            "reason": unsupported_reason("7"), "cheat_line": cond_line,
+        }
+    if is_supported_manual_code(first):
+        t, msg, _ = manual_message(first, value)
+        cheat_line = engine.CheatLine(raw=normalized, address=first, value=value, type=t, message=msg)
+        return {
+            "kind": "code", "lineno": lineno, "raw": line, "normalized": normalized,
+            "type": t, "supported": True, "is_condition": False, "message": msg, "cheat_line": cheat_line,
+        }
+    return {
+        "kind": "code", "lineno": lineno, "raw": line, "normalized": normalized,
+        "type": type_char, "supported": False, "is_condition": False, "reason": unsupported_reason(type_char),
+    }
 
 
 def analyze_manual_cheats(text: str) -> ManualAnalysis:
@@ -226,6 +263,32 @@ def analyze_manual_cheats(text: str) -> ManualAnalysis:
         invalid_entries = [e for e in block_entries if e.get("kind") == "invalid"]
         unsupported_entries = [e for e in code_entries if not e.get("supported")]
         supported_entries = [e for e in code_entries if e.get("supported")]
+
+        # Special case: a supported type-7 conditional pair is exactly two code
+        # lines, the first a type-7 condition, the second a supported write.
+        is_cond_pair = (
+            not invalid_entries
+            and len(code_entries) == 2
+            and code_entries[0].get("is_condition")
+            and code_entries[0].get("type") == "7"
+            and code_entries[1].get("supported")
+            and not code_entries[1].get("is_condition")
+        )
+        if is_cond_pair:
+            cond_e, write_e = code_entries[0], code_entries[1]
+            cheat_lines = [cond_e["cheat_line"], write_e["cheat_line"]]
+            report.append(f"[OK] Cheat {block_no}: {title} (conditional, beta)")
+            report.append(f"  Line {cond_e['lineno']}: {cond_e['normalized']} — {cond_e['message']}.")
+            report.append(f"  Line {write_e['lineno']}: {write_e['normalized']} — code starts with {write_e['type']}; {write_e['message']}.")
+            report.append("")
+            ok_count += 2
+            selected.append(engine.SelectedCheat(title=title, lines=cheat_lines))
+            auto_no += 1
+            block_no += 1
+            current_title = None
+            block_entries = []
+            return
+
         if invalid_entries:
             invalid_count += len(invalid_entries)
             report.append(f"[INVALID] Cheat {block_no}: {title}")
@@ -266,20 +329,7 @@ def analyze_manual_cheats(text: str) -> ManualAnalysis:
         if m:
             first = int(m.group(1), 16)
             value = int(m.group(2), 16)
-            type_char = f"{first:08X}"[0]
-            normalized = f"{m.group(1).upper()} {m.group(2).upper()}"
-            if not is_supported_manual_code(first):
-                block_entries.append({
-                    "kind": "code", "lineno": lineno, "raw": line, "normalized": normalized,
-                    "type": type_char, "supported": False, "reason": unsupported_reason(type_char),
-                })
-            else:
-                t, msg, _ = manual_message(first, value)
-                cheat_line = engine.CheatLine(raw=normalized, address=first, value=value, type=t, message=msg)
-                block_entries.append({
-                    "kind": "code", "lineno": lineno, "raw": line, "normalized": normalized,
-                    "type": t, "supported": True, "message": msg, "cheat_line": cheat_line,
-                })
+            block_entries.append(build_manual_code_entry(lineno, line, first, value))
             continue
         if "?" in line and HEXISH_RE.match(line):
             block_entries.append({"kind": "invalid", "lineno": lineno, "raw": line, "reason": "replace ?? with a real hexadecimal value before patching"})
@@ -327,6 +377,7 @@ class CheatPatcherGUI(tk.Tk):
         self.manual_status_var = tk.StringVar(value="Paste direct CodeBreaker cheats here, then click Validate.")
         self.manual_text_cache = ""
         self.manual_analysis: Optional[ManualAnalysis] = None
+        self.manual_dialog = None
         self.use_manual_cheats = False
         self.last_output_dir: Optional[Path] = None
         self._tk_color_widgets: List[tk.Widget] = []
@@ -374,6 +425,8 @@ class CheatPatcherGUI(tk.Tk):
         style.configure("TLabelframe", background=c["bg"], foreground=c["text"], bordercolor=c["border"], relief="solid", borderwidth=1)
         style.configure("TLabelframe.Label", background=c["bg"], foreground=c["text"])
         style.configure("TCheckbutton", background=c["panel"], foreground=c["text"], font=self.base_font)
+        # Larger checkbox for the Type 7 beta toggle (bigger indicator + text).
+        style.configure("Big.TCheckbutton", background=c["panel"], foreground=c["text"], font=(self.ui_family, 11, "bold"), indicatorsize=18, padding=(2, 4))
         style.configure("TEntry", fieldbackground=c["field"], foreground=c["text"], bordercolor=c["border"], lightcolor=c["border"], darkcolor=c["border"])
         style.configure("App.TButton", padding=(13, 8), borderwidth=2, relief="solid", background=c["button"], foreground=c["text"], font=self.base_font, focusthickness=2, focuscolor=c["border"])
         style.map("App.TButton", background=[("active", c["button_active"]), ("pressed", c["button_active"])] )
@@ -426,7 +479,7 @@ class CheatPatcherGUI(tk.Tk):
         title_area = ttk.Frame(top)
         title_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ttk.Label(title_area, text="GBA Cheat Patcher Studio", font=self.heading_font).pack(anchor="w")
-        ttk.Label(title_area, text="Version 1.1", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(title_area, text=f"Version {engine.VERSION}", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
 
         body = (
             "A small desktop tool for patching supported CodeBreaker cheats "
@@ -572,6 +625,11 @@ class CheatPatcherGUI(tk.Tk):
             except Exception:
                 pass
 
+        # Track refreshers so Select all / Clear can update the visuals too.
+        if not hasattr(self, "_cheat_refreshers"):
+            self._cheat_refreshers = []
+        self._cheat_refreshers.append(refresh)
+
         def toggle(_event=None):
             variable.set(not variable.get())
             refresh()
@@ -623,15 +681,20 @@ class CheatPatcherGUI(tk.Tk):
         tools = ttk.Frame(cheats_frame); tools.pack(fill=tk.X, padx=6, pady=6)
         self.button(tools, "Select all", self.select_all_cheats).pack(side=tk.LEFT, padx=2)
         self.button(tools, "Clear", self.clear_cheats).pack(side=tk.LEFT, padx=2)
+        # Live counter of how many cheats are currently selected (simple + type 7).
+        self.cheats_selected_var = tk.StringVar(value="0 cheats selected")
+        ttk.Label(tools, textvariable=self.cheats_selected_var, style="Muted.TLabel").pack(side=tk.RIGHT, padx=8)
+
+        tools2 = ttk.Frame(cheats_frame); tools2.pack(fill=tk.X, padx=6, pady=(0, 4))
         cond_cb = ttk.Checkbutton(
-            tools,
+            tools2,
             text="Include conditional cheats (Type 7, beta)",
             variable=self.include_conditional,
             command=self._on_toggle_conditional,
-            style="TCheckbutton",
+            style="Big.TCheckbutton",
         )
-        cond_cb.pack(side=tk.LEFT, padx=12)
-        ttk.Label(tools, text="Direct codes (3, 8, 2, 6) are always selectable.").pack(side=tk.LEFT, padx=12)
+        cond_cb.pack(side=tk.LEFT, padx=2)
+        ttk.Label(tools2, text="Direct codes (3, 8, 2, 6) are always selectable.", style="Muted.TLabel").pack(side=tk.LEFT, padx=12)
         self.cheat_canvas = tk.Canvas(cheats_frame, highlightthickness=0, bg=self.colors["panel"])
         self.cheat_scroll = ttk.Scrollbar(cheats_frame, orient=tk.VERTICAL, command=self.cheat_canvas.yview)
         self.cheat_inner = ttk.Frame(self.cheat_canvas)
@@ -916,6 +979,48 @@ class CheatPatcherGUI(tk.Tk):
         self.code_popup = None
         self.code_popup_anchor = None
 
+    def attach_text_context_menu(self, widget: tk.Text):
+        """Add a right-click Cut/Copy/Paste/Select all menu to a Text widget.
+
+        Tkinter handles keyboard paste (Ctrl+V / Cmd+V) by default, but not a
+        mouse context menu. This adds one so users can paste cheats from the
+        clipboard using the mouse. Works on Windows, macOS and Linux.
+        """
+        menu = tk.Menu(widget, tearoff=0)
+
+        def do(event_name):
+            widget.event_generate(event_name)
+
+        def select_all():
+            widget.tag_add("sel", "1.0", "end-1c")
+            return "break"
+
+        menu.add_command(label="Cut", command=lambda: do("<<Cut>>"))
+        menu.add_command(label="Copy", command=lambda: do("<<Copy>>"))
+        menu.add_command(label="Paste", command=lambda: do("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="Select all", command=select_all)
+
+        def show_menu(event):
+            # Disable editing actions when the widget is read-only.
+            try:
+                editable = str(widget.cget("state")) == "normal"
+            except Exception:
+                editable = True
+            menu.entryconfigure("Cut", state=("normal" if editable else "disabled"))
+            menu.entryconfigure("Paste", state=("normal" if editable else "disabled"))
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return "break"
+
+        # Button-3 is right-click on Windows/Linux and most mice on macOS.
+        widget.bind("<Button-3>", show_menu)
+        # macOS also commonly maps right-click to Button-2 / Control-click.
+        widget.bind("<Button-2>", show_menu)
+        widget.bind("<Control-Button-1>", show_menu)
+
     def toggle_cheat_code_popup(self, cheat: dict, anchor_widget):
         if self.code_popup is not None and self.code_popup_anchor is anchor_widget:
             self.close_code_popup()
@@ -985,13 +1090,16 @@ class CheatPatcherGUI(tk.Tk):
         self.close_code_popup()
         for child in self.cheat_inner.winfo_children(): child.destroy()
         self.cheat_items.clear()
+        self._cheat_refreshers = []
         if not game:
             ttk.Label(self.cheat_inner, text="No CRC-matching supported cheats found for this ROM. Use Manual Cheats if needed.").pack(anchor="w", padx=6, pady=6)
+            self.update_cheats_selected_count()
             return
         items=engine.selectable_cheats(game)
         cond_items = engine.conditional_cheats(game) if self.include_conditional.get() else []
         if not items and not cond_items:
             ttk.Label(self.cheat_inner, text="This ROM matched the database, but it has no supported direct CodeBreaker cheats.").pack(anchor="w", padx=6, pady=6)
+            self.update_cheats_selected_count()
             return
         display_no = 0
         for (db_idx,ch) in items:
@@ -1025,28 +1133,70 @@ class CheatPatcherGUI(tk.Tk):
             self._bind_cheat_row_mousewheel(row)
             self._bind_cheat_row_mousewheel(cb)
             self._bind_cheat_row_mousewheel(info_btn)
+        self.update_cheats_selected_count()
+
+    def _refresh_cheat_visuals(self):
+        for fn in getattr(self, "_cheat_refreshers", []):
+            fn()
+
+    def update_cheats_selected_count(self):
+        """Update the 'N cheats selected' label (counts simple + visible type 7)."""
+        count = sum(1 for _, _, var, _, _ in self.cheat_items if var.get())
+        var = getattr(self, "cheats_selected_var", None)
+        if var is not None:
+            var.set(f"{count} cheat{'s' if count != 1 else ''} selected")
 
     def _on_toggle_conditional(self):
+        # "Clear and warn": if the user turns the toggle OFF while type-7 cheats
+        # are selected, those selections are dropped and we tell them how many.
+        if not self.include_conditional.get():
+            removed = sum(1 for _, _, var, _, is_cond in self.cheat_items if is_cond and var.get())
+            if removed:
+                messagebox.showinfo(
+                    "Conditional cheats removed",
+                    f"{removed} Type 7 (beta) cheat(s) were unselected because conditional cheats are now hidden.",
+                    parent=self,
+                )
         # Re-render the list to add/remove conditional entries; keep current game.
         self.populate_cheats(self.current_cheat_game)
         self.update_output_name()
+        self.update_cheats_selected_count()
 
     def on_auto_cheat_changed(self):
         if any(var.get() for _,_,var,_,_ in self.cheat_items):
             self.use_manual_cheats = False
         self.update_output_name()
+        self.update_cheats_selected_count()
 
     def select_all_cheats(self):
         self.use_manual_cheats = False
         for _,_,var,_,_ in self.cheat_items: var.set(True)
+        self._refresh_cheat_visuals()
         self.update_output_name()
+        self.update_cheats_selected_count()
 
     def clear_cheats(self):
         for _,_,var,_,_ in self.cheat_items: var.set(False)
+        self._refresh_cheat_visuals()
         self.update_output_name()
+        self.update_cheats_selected_count()
 
     def open_manual_dialog(self):
+        # If a manual dialog is already open, focus it instead of opening another.
+        existing = getattr(self, "manual_dialog", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+            self.manual_dialog = None
+
         dialog = tk.Toplevel(self)
+        self.manual_dialog = dialog
         dialog.title("Manual CodeBreaker Cheats")
         dialog.geometry("980x620")
         dialog.minsize(820, 520)
@@ -1054,13 +1204,23 @@ class CheatPatcherGUI(tk.Tk):
         dialog.resizable(True, True)
         # Keep this as a normal resizable window so the maximize button is available.
 
+        def _on_close():
+            self.manual_dialog = None
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        dialog.protocol("WM_DELETE_WINDOW", _on_close)
+
         frame = ttk.Frame(dialog, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
         ttk.Label(frame, text="Manual CodeBreaker Cheats", font=self.subheading_font).pack(anchor="w")
         help_text = (
             "Use this if the loaded ROM was not found in the bundled cheat database, or if you found CodeBreaker cheats online.\n"
             "Enter one cheat title followed by one or more code lines. Separate cheats with a blank line.\n"
-            "Supported now: codes starting with 3, 8, 2 or 6. Unsupported: codes starting with 4, 5, 7, A, B, C, D, F, 0, 1 or 9."
+            "Supported: direct codes starting with 3, 8, 2 or 6, and Type 7 conditional pairs (a 7 line "
+            "followed by one supported write). Unsupported: 4, 5, A, B, C, D, F, 0, 1, 9 and complex blocks."
         )
         ttk.Label(frame, text=help_text, justify=tk.LEFT, style="Muted.TLabel", wraplength=920).pack(anchor="w", pady=(0, 6))
 
@@ -1070,7 +1230,10 @@ class CheatPatcherGUI(tk.Tk):
             "Max Money\n"
             "33009883 0022\n\n"
             "Infinite Lives\n"
-            "33000FC8 0009"
+            "83000FC8 0009\n\n"
+            "Start With 1000 Credits  (Type 7 conditional pair)\n"
+            "7201A67A 000A\n"
+            "8201A67A 03E8"
         )
         ttk.Label(example_box, text=example_text, justify=tk.LEFT, font=self.mono_font).pack(anchor="w", padx=8, pady=6)
 
@@ -1085,10 +1248,12 @@ class CheatPatcherGUI(tk.Tk):
         manual_text = tk.Text(left, height=14, wrap=tk.WORD, bg=self.colors["field"], fg=self.colors["text"], insertbackground=self.colors["text"], relief="solid", bd=1, font=self.base_font)
         manual_text.pack(fill=tk.BOTH, expand=True)
         manual_text.insert("1.0", self.manual_text_cache)
+        self.attach_text_context_menu(manual_text)
         ttk.Label(right, text="Validation report:").pack(anchor="w")
         report_text = tk.Text(right, height=14, wrap=tk.WORD, bg=self.colors["field"], fg=self.colors["text"], insertbackground=self.colors["text"], relief="solid", bd=1, font=self.base_font)
         report_text.pack(fill=tk.BOTH, expand=True)
         report_text.configure(state=tk.DISABLED)
+        self.attach_text_context_menu(report_text)
 
         def set_report(lines: List[str]):
             report_text.configure(state=tk.NORMAL)
@@ -1125,7 +1290,7 @@ class CheatPatcherGUI(tk.Tk):
             self.clear_cheats()
             self.update_output_name()
             self.status_var.set(f"Manual cheats active: {len(analysis.selected)} cheat(s). Click Patch ROM.")
-            dialog.destroy()
+            _on_close()
 
         def clear_text():
             manual_text.delete("1.0", tk.END)
@@ -1139,7 +1304,7 @@ class CheatPatcherGUI(tk.Tk):
         self.button(button_row, "Validate", lambda: run_validate(True)).pack(side=tk.LEFT, padx=2)
         self.button(button_row, "Apply Manual Cheats", use_manual, accent=True).pack(side=tk.LEFT, padx=8)
         self.button(button_row, "Clear", clear_text).pack(side=tk.LEFT, padx=2)
-        self.button(button_row, "Close", dialog.destroy).pack(side=tk.RIGHT, padx=2)
+        self.button(button_row, "Close", _on_close).pack(side=tk.RIGHT, padx=2)
 
         if self.manual_text_cache.strip():
             run_validate(False)
