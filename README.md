@@ -24,6 +24,9 @@ The portable EXE is Windows-only. On macOS or Linux, run from source instead.
 ## Features
 
 - Automatic GBA ROM detection by CRC32
+- Fallback detection by ROM header game code (for IPS-patched ROMs)
+- Manual game override via title search ("Choose another game...")
+- Double-patch guard: blocks patching a ROM already patched by this app
 - Cheat matching using bundled CodeBreaker data
 - ROM metadata matching using bundled No-Intro CRC data
 - Supported cheat selection with live selection counter
@@ -43,10 +46,17 @@ Compatibility is not guaranteed for every game. Some patched ROMs may crash, fre
 
 ### Compatibility with IPS ROM hacks
 
-ROM hacks (`.ips` files) can be combined with this tool, but order matters:
+ROM hacks (`.ips` files) can be combined with this tool. The recommended workflow is:
 
-- ✅ **IPS patch first, then cheats** — works reliably. Since the IPS patch changes the CRC, use Manual Cheats to apply codes after patching.
-- ❌ **Cheats first, then IPS patch** — will likely break the ROM. The IPS patch can overwrite the hook this app injected.
+**1. Apply the IPS patch first, then load the result in this app.**
+
+When you load an IPS-patched ROM, the CRC will not match the database. The app automatically tries to identify the game by reading the ROM header game code and matching it to the cheat database. If a match is found, a yellow banner appears confirming the forced match, and the cheat list loads normally — no manual steps needed.
+
+If the game code also fails to match (rare), a **"Choose another game..."** button appears in the banner. Click it to search the cheat database by title and load the cheats manually.
+
+**2. Do not apply IPS patches on top of a ROM already patched by this app.**
+
+If you load a ROM that was already patched by this app, a red banner appears and the Patch button is disabled. Patching it again would stack a second cheat engine on top of the existing one, which may cause crashes or unpredictable behavior. Always start from the original (or IPS-patched) ROM and apply cheats in a single pass.
 
 ## Supported CodeBreaker Types
 
