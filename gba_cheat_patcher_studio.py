@@ -1048,7 +1048,7 @@ class CheatPatcherGUI(tk.Tk):
                 self.status_var.set("ROM detected, but no CRC-matching cheats were found.")
                 self._show_forced_banner(
                     "⚠ CRC not recognized and no game code match. "
-                    "You can force a game from the cheat database, or use Manual Cheats below.",
+                    "You can force a game from the cheat database, or use Manual Cheats.",
                     show_choose_button=True,
                     level="yellow",
                 )
