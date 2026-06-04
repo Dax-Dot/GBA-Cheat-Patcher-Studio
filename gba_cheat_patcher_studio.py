@@ -378,6 +378,9 @@ class CheatPatcherGUI(tk.Tk):
         self.manual_text_cache = ""
         self.manual_analysis: Optional[ManualAnalysis] = None
         self.manual_dialog = None
+        self.force_match_dialog = None
+        self._force_match_reason: str = ""
+        self._already_patched: bool = False
         self.use_manual_cheats = False
         self.last_output_dir: Optional[Path] = None
         self._tk_color_widgets: List[tk.Widget] = []
@@ -678,6 +681,25 @@ class CheatPatcherGUI(tk.Tk):
 
         cheats_frame = ttk.LabelFrame(right, text="Supported cheats for this ROM")
         cheats_frame.pack(fill=tk.BOTH, expand=True, pady=4)
+
+        # Forced-match banner (hidden by default). Shown when cheats are loaded
+        # from a non-CRC source: game code fallback, or user manual override.
+        self.forced_banner = tk.Frame(cheats_frame, bg="#FFF3B0", relief="solid", bd=1)
+        self.forced_banner_text = tk.Label(
+            self.forced_banner, text="",
+            bg="#FFF3B0", fg="#5C4500",
+            font=(self.ui_family, 9), wraplength=560, justify=tk.LEFT, anchor="w",
+        )
+        self.forced_banner_text.pack(side=tk.LEFT, padx=10, pady=6, fill=tk.X, expand=True)
+        self.forced_banner_btn = tk.Button(
+            self.forced_banner, text="Choose another game...",
+            command=self.open_force_match_dialog,
+            font=(self.ui_family, 9), relief="solid", bd=1, padx=10, pady=2,
+            bg="#FFE680", fg="#5C4500", activebackground="#FFD940", cursor="hand2",
+        )
+        self.forced_banner_btn.pack(side=tk.RIGHT, padx=8, pady=4)
+        # Not packed yet; shown via _show_forced_banner / _hide_forced_banner.
+
         tools = ttk.Frame(cheats_frame); tools.pack(fill=tk.X, padx=6, pady=6)
         self.button(tools, "Select all", self.select_all_cheats).pack(side=tk.LEFT, padx=2)
         self.button(tools, "Clear", self.clear_cheats).pack(side=tk.LEFT, padx=2)
@@ -708,17 +730,22 @@ class CheatPatcherGUI(tk.Tk):
 
     def _enable_mousewheel_for_cheats(self):
         def _scroll(event):
-            # Make each physical mouse-wheel notch visibly scroll the checkbox list.
-            if getattr(event, "num", None) == 4:
-                amount = -5
-            elif getattr(event, "num", None) == 5:
-                amount = 5
+            # Smoother scroll than a 5-unit jump per notch (which felt like
+            # screen tearing on long lists). 2 units per notch is the sweet
+            # spot for the row height we use, and on Windows we follow the
+            # actual reported delta so high-resolution wheels behave well.
+            if getattr(event, "num", None) == 4:        # Linux wheel up
+                amount = -2
+            elif getattr(event, "num", None) == 5:      # Linux wheel down
+                amount = 2
             else:
                 delta = getattr(event, "delta", 0)
                 if delta == 0:
                     amount = 0
-                else:
-                    amount = -5 if delta > 0 else 5
+                elif abs(delta) >= 120:                 # Windows: 120 per notch
+                    amount = -(delta // 120) * 2
+                else:                                   # macOS: small deltas
+                    amount = -1 if delta > 0 else 1
             if amount:
                 self.cheat_canvas.yview_scroll(amount, "units")
             return "break"
@@ -796,6 +823,154 @@ class CheatPatcherGUI(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Output folder", f"Could not open folder:\n{folder}\n\n{exc}")
 
+    # Banner color palettes for the two warning levels.
+    _BANNER_YELLOW = {"bg": "#FFF3B0", "fg": "#5C4500", "btn_bg": "#FFE680", "btn_active": "#FFD940"}
+    _BANNER_RED    = {"bg": "#FFD6D6", "fg": "#7A1F1F", "btn_bg": "#FFB3B3", "btn_active": "#FF9999"}
+
+    def _show_forced_banner(self, message: str, show_choose_button: bool = True, level: str = "yellow"):
+        """Display the forced-match banner at the top of the cheats frame.
+
+        level: 'yellow' for soft warnings (CRC fallback / manual override),
+               'red' for hard warnings (ROM already patched by this app).
+        """
+        palette = self._BANNER_RED if level == "red" else self._BANNER_YELLOW
+        self.forced_banner.configure(bg=palette["bg"])
+        self.forced_banner_text.configure(text=message, bg=palette["bg"], fg=palette["fg"])
+        self.forced_banner_btn.configure(bg=palette["btn_bg"], fg=palette["fg"], activebackground=palette["btn_active"])
+        if show_choose_button:
+            self.forced_banner_btn.pack(side=tk.RIGHT, padx=8, pady=4)
+        else:
+            self.forced_banner_btn.pack_forget()
+        if not self.forced_banner.winfo_ismapped():
+            # Place banner above all current children of the cheats frame.
+            siblings = [c for c in self.forced_banner.master.winfo_children() if c is not self.forced_banner and c.winfo_ismapped()]
+            if siblings:
+                self.forced_banner.pack(fill=tk.X, padx=6, pady=(6, 0), before=siblings[0])
+            else:
+                self.forced_banner.pack(fill=tk.X, padx=6, pady=(6, 0))
+
+    def _hide_forced_banner(self):
+        if self.forced_banner.winfo_ismapped():
+            self.forced_banner.pack_forget()
+
+    def open_force_match_dialog(self):
+        """Title-search dialog for picking a cheat DB game when CRC + game code both fail.
+
+        Used as a fallback when automatic detection doesn't find a match, or
+        when the user wants to override the auto-detected game.
+        """
+        if not self.cheat_db:
+            messagebox.showwarning("No cheat database", "The cheat database is not loaded.", parent=self)
+            return
+        existing = getattr(self, "force_match_dialog", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify(); existing.lift(); existing.focus_force()
+                    return
+            except Exception:
+                pass
+            self.force_match_dialog = None
+
+        dialog = tk.Toplevel(self)
+        self.force_match_dialog = dialog
+        dialog.title("Choose a game (force match)")
+        dialog.geometry("820x600"); dialog.minsize(640, 460)
+        dialog.configure(bg=self.colors["bg"])
+
+        def _on_close():
+            self.force_match_dialog = None
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+        dialog.protocol("WM_DELETE_WINDOW", _on_close)
+
+        container = ttk.Frame(dialog, padding=14)
+        container.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            container,
+            text=(
+                "Type the game's title below to search the cheat database. "
+                "Results filter as you type. Pick the matching game and its "
+                "cheats will be loaded for the current ROM, even though its "
+                "CRC does not match."
+            ),
+            style="Muted.TLabel", wraplength=760, justify=tk.LEFT,
+        ).pack(anchor="w", pady=(0, 10))
+
+        # Search row: label + entry, so the input field is unmistakable even in dark mode.
+        search_row = ttk.Frame(container); search_row.pack(fill=tk.X)
+        ttk.Label(search_row, text="Game title:", font=(self.ui_family, 10, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        search_var = tk.StringVar()
+        # Use a tk.Entry (not ttk.Entry) so we can force a visible insertion
+        # cursor color — otherwise the cursor is invisible on dark themes.
+        entry = tk.Entry(
+            search_row,
+            textvariable=search_var,
+            bg=self.colors["field"],
+            fg=self.colors["text"],
+            insertbackground=self.colors["text"],   # cursor color
+            insertwidth=2,                          # thicker cursor
+            relief="solid", bd=1,
+            font=(self.ui_family, 11),
+        )
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+        self.attach_text_context_menu_entry(entry)
+        entry.focus_set()
+
+        results_frame = ttk.Frame(container); results_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 10))
+        listbox = tk.Listbox(results_frame, bg=self.colors["field"], fg=self.colors["text"], selectbackground=self.colors["accent"], selectforeground=self.colors["accent_text"], relief="solid", bd=1, font=self.base_font, activestyle="none")
+        scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        current_results: List[dict] = []
+
+        def refresh_results(*_):
+            current_results.clear()
+            listbox.delete(0, tk.END)
+            results = engine.search_games_by_title(self.cheat_db, search_var.get(), limit=200)
+            for g in results:
+                supported = len(engine.selectable_cheats(g))
+                cond = len(engine.conditional_cheats(g))
+                tail = f"  [{supported} simple"
+                if cond: tail += f", {cond} cond"
+                tail += "]"
+                listbox.insert(tk.END, f"{g['title']}{tail}")
+                current_results.append(g)
+
+        search_var.trace_add("write", refresh_results)
+        refresh_results()
+
+        def apply_choice():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showinfo("Pick a game", "Select a game from the list first.", parent=dialog)
+                return
+            game = current_results[sel[0]]
+            self.current_cheat_game = game
+            self._force_match_reason = f"manual override: {game.get('title')}"
+            self.populate_cheats(game)
+            self.update_output_name()
+            supported = len(engine.selectable_cheats(game))
+            self.status_var.set(f"Forced match: {game.get('title')} - {supported} cheat(s) available.")
+            self._show_forced_banner(
+                f"⚠ Forced match (manual): cheats from \"{game.get('title')}\". "
+                "The CRC does not match this ROM. Patched cheats may not work or may behave unexpectedly.",
+                show_choose_button=True,
+            )
+            _on_close()
+
+        def on_double_click(_e):
+            apply_choice()
+        listbox.bind("<Double-Button-1>", on_double_click)
+
+        btn_row = ttk.Frame(container); btn_row.pack(fill=tk.X)
+        self.button(btn_row, "Use selected game", apply_choice, accent=True).pack(side=tk.LEFT)
+        self.button(btn_row, "Cancel", _on_close).pack(side=tk.RIGHT)
+
     def detect_rom(self):
         rom=Path(self.rom_path_var.get().strip().strip('"')).expanduser()
         if not rom.exists():
@@ -807,21 +982,76 @@ class CheatPatcherGUI(tk.Tk):
             self.current_rom_header=engine.gba_header_info(data)
             self.current_cheat_game=None
             self.current_nointro_info=None
+            self._force_match_reason = ""
+            self._hide_forced_banner()
+
+            # First check: was this ROM already patched by THIS app?
+            # If so, refuse to patch again to avoid stacking multiple engines.
+            already_patched_at = engine.detect_app_patch_signature(data)
+            if already_patched_at is not None:
+                self.populate_cheats(None)  # clear the list, just in case
+                self.show_detected_info(rom)
+                self.update_output_name()
+                self.patch_button.configure(state=tk.DISABLED)
+                self._already_patched = True
+                self.status_var.set(f"ROM already patched at 0x{0x08000000 + already_patched_at:08X}. Patching is disabled.")
+                self._show_forced_banner(
+                    "⛔ This ROM appears to be already patched by GBA Cheat Patcher Studio "
+                    f"(signature found at 0x{0x08000000 + already_patched_at:08X}). "
+                    "Patching it again would stack a second cheat engine on top, which may behave unpredictably. "
+                    "Use the original (unpatched) ROM and apply all cheats in a single pass.",
+                    show_choose_button=False,
+                    level="red",
+                )
+                return
+
+            # Normal flow: ROM is clean, re-enable patching.
+            self._already_patched = False
+            self.patch_button.configure(state=tk.NORMAL)
+
             if self.nointro_db:
                 self.current_nointro_info=self.nointro_db.get('by_crc',{}).get(self.current_rom_crc)
             cheat_matches=[]
             if self.cheat_db:
                 cheat_matches=self.cheat_db.get('by_crc',{}).get(self.current_rom_crc,[])
             if cheat_matches:
+                # Normal CRC match path: nothing forced.
                 self.current_cheat_game=cheat_matches[0]
+            elif self.cheat_db:
+                # CRC failed (e.g. IPS-patched ROM). Try the ROM header game code.
+                game_code = (self.current_rom_header.get("game_code") or "").strip().upper()
+                if game_code:
+                    code_matches = engine.find_games_by_game_code(self.cheat_db, game_code, self.nointro_db)
+                    if code_matches:
+                        # Auto-load the first match and show the yellow warning banner.
+                        self.current_cheat_game = code_matches[0]
+                        self._force_match_reason = f"game code '{game_code}'"
             self.populate_cheats(self.current_cheat_game)
             self.show_detected_info(rom)
             self.update_output_name()
-            if self.current_cheat_game:
+            if self.current_cheat_game and self._force_match_reason:
+                # Forced match: show the yellow banner with details.
+                supported = len(engine.selectable_cheats(self.current_cheat_game))
+                title = self.current_cheat_game.get("title", "?")
+                self.status_var.set(f"Forced match by {self._force_match_reason}: {supported} cheat(s) loaded.")
+                self._show_forced_banner(
+                    f"⚠ CRC not recognized. Cheats loaded by {self._force_match_reason}: \"{title}\". "
+                    "Patched cheats may not work on this modified ROM (e.g. IPS-patched).",
+                    show_choose_button=True,
+                    level="yellow",
+                )
+            elif self.current_cheat_game:
                 supported=len(engine.selectable_cheats(self.current_cheat_game))
                 self.status_var.set(f"ROM detected. {supported} supported cheat(s) available.")
             else:
-                self.status_var.set("ROM detected, but no CRC-matching cheats were found. Use Manual Cheats if needed.")
+                # Nothing matched. Offer the manual-search dialog via banner.
+                self.status_var.set("ROM detected, but no CRC-matching cheats were found.")
+                self._show_forced_banner(
+                    "⚠ CRC not recognized and no game code match. "
+                    "You can force a game from the cheat database, or use Manual Cheats below.",
+                    show_choose_button=True,
+                    level="yellow",
+                )
         except Exception as exc:
             self.status_var.set("Detection error")
             self.log("ERROR detecting ROM: " + str(exc))
@@ -1021,6 +1251,30 @@ class CheatPatcherGUI(tk.Tk):
         widget.bind("<Button-2>", show_menu)
         widget.bind("<Control-Button-1>", show_menu)
 
+    def attach_text_context_menu_entry(self, widget: tk.Entry):
+        """Right-click Cut/Copy/Paste/Select all menu for a tk.Entry widget."""
+        menu = tk.Menu(widget, tearoff=0)
+        def do(event_name):
+            widget.event_generate(event_name)
+        def select_all():
+            widget.select_range(0, tk.END)
+            widget.icursor(tk.END)
+            return "break"
+        menu.add_command(label="Cut", command=lambda: do("<<Cut>>"))
+        menu.add_command(label="Copy", command=lambda: do("<<Copy>>"))
+        menu.add_command(label="Paste", command=lambda: do("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="Select all", command=select_all)
+        def show_menu(event):
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return "break"
+        widget.bind("<Button-3>", show_menu)
+        widget.bind("<Button-2>", show_menu)
+        widget.bind("<Control-Button-1>", show_menu)
+
     def toggle_cheat_code_popup(self, cheat: dict, anchor_widget):
         if self.code_popup is not None and self.code_popup_anchor is anchor_widget:
             self.close_code_popup()
@@ -1091,6 +1345,11 @@ class CheatPatcherGUI(tk.Tk):
         for child in self.cheat_inner.winfo_children(): child.destroy()
         self.cheat_items.clear()
         self._cheat_refreshers = []
+        # Scroll-to-top whenever the list is rebuilt, otherwise the canvas
+        # keeps the previous scroll offset and the new (possibly shorter)
+        # content shows up with empty space at the top. Defer to after_idle
+        # so the scrollregion is updated first.
+        self.after_idle(lambda: self.cheat_canvas.yview_moveto(0.0))
         if not game:
             ttk.Label(self.cheat_inner, text="No CRC-matching supported cheats found for this ROM. Use Manual Cheats if needed.").pack(anchor="w", padx=6, pady=6)
             self.update_cheats_selected_count()
@@ -1370,6 +1629,14 @@ class CheatPatcherGUI(tk.Tk):
         if not rom.exists():
             messagebox.showerror("ROM not found", f"File does not exist:\n{rom}")
             return
+        if getattr(self, "_already_patched", False):
+            messagebox.showerror(
+                "ROM already patched",
+                "This ROM was already patched by GBA Cheat Patcher Studio. "
+                "Patching it again would stack a second engine on top. "
+                "Use the original (unpatched) ROM and apply all cheats in a single pass.",
+            )
+            return
         out_raw=self.output_path_var.get().strip().strip('"')
         if not out_raw:
             self.update_output_name(); out_raw=self.output_path_var.get().strip().strip('"')
@@ -1381,6 +1648,7 @@ class CheatPatcherGUI(tk.Tk):
             return
         current_rom_crc = self.current_rom_crc
         nointro_name = self.current_nointro_info.get("name", "") if self.current_nointro_info else ""
+        force_reason = getattr(self, "_force_match_reason", "") or ""
 
         self.patch_button.configure(state=tk.DISABLED)
         self.status_var.set("Patching...")
@@ -1396,6 +1664,8 @@ class CheatPatcherGUI(tk.Tk):
                     engine.log_print(log, f"Detected ROM CRC32: {current_rom_crc}")
                 if nointro_name:
                     engine.log_print(log, f"No-Intro match: {nointro_name}")
+                if force_reason:
+                    engine.log_print(log, f"FORCED MATCH: cheats loaded by {force_reason} (CRC did not match this ROM)")
                 engine.log_print(log, f"Recommended profile: {engine.RECOMMENDED_PROFILE_NAME}")
                 engine.patch_rom(rom, out, selected, log, vblank=False, execute_every=1, max_hooks=1, hook_indices=[1], skip_early_hooks=False, behavior_profile="constant")
                 log_path=out.with_suffix(".patch-log.txt")
@@ -1412,14 +1682,16 @@ class CheatPatcherGUI(tk.Tk):
         self.status_var.set("Patch completed successfully")
         self.log(f"OK: {out}")
         self.log(f"Log: {log_path}")
-        self.patch_button.configure(state=tk.NORMAL)
+        if not getattr(self, "_already_patched", False):
+            self.patch_button.configure(state=tk.NORMAL)
         messagebox.showinfo("Done", f"Patched ROM created:\n{out}\n\nLog:\n{log_path}")
 
     def _patch_error(self, exc: Exception, tb: str):
         self.status_var.set("Error")
         self.log("ERROR: " + str(exc))
         self.log(tb)
-        self.patch_button.configure(state=tk.NORMAL)
+        if not getattr(self, "_already_patched", False):
+            self.patch_button.configure(state=tk.NORMAL)
         messagebox.showerror("Patch error", str(exc))
 
 

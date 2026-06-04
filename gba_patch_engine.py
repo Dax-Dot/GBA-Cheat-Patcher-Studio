@@ -702,6 +702,101 @@ def make_selected(game: dict, cheat_indices: List[int]) -> List[SelectedCheat]:
     return selected
 
 
+def _extract_serial_codes(serial_field: str) -> List[str]:
+    """Return list of 4-character game codes inside a cheat DB 'serial' field.
+
+    The cheat DB stores serials like 'AGB-BJBE-USA, AGB-BJBP-EUR' while GBA
+    ROM headers only carry the 4-character code (e.g. 'BJBE'). GBA game codes
+    are uppercase letters and digits, so we accept [A-Z0-9]{4} and explicitly
+    skip the 'AGB-' prefix which always precedes the real code.
+    """
+    if not serial_field:
+        return []
+    # Find every 4-char uppercase alphanumeric token NOT immediately after a
+    # word character (so 'AGB-BJBE' yields just BJBE, not AGBB).
+    found = re.findall(r"(?:^|[^A-Z0-9])([A-Z0-9]{4})(?:[^A-Z0-9]|$)", serial_field.upper())
+    # Drop the 'AGB-' prefix itself if it leaked in.
+    return [c for c in found if c != "AGB-"[:4] and c != "AGB"]
+
+
+def find_games_by_game_code(cheat_db: dict, game_code: str, nointro_db: Optional[dict] = None) -> List[dict]:
+    """Find cheat DB games that match a 4-character game code from a ROM header.
+
+    Useful when CRC32 lookup fails (e.g. the ROM was modified by an IPS patch).
+    Two-step strategy:
+      1. Direct: scan the cheat DB 'serial' field for the code.
+      2. Bridge (only if step 1 returns nothing and a no-intro DB is given):
+         resolve the code to its known CRC32s via nointro['by_serial'], then
+         match those CRCs against the cheat DB.
+
+    Returns possibly-multiple games (different regions can share a code prefix);
+    the caller decides how to present them.
+    """
+    code = (game_code or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{4}", code):
+        return []
+
+    direct: List[dict] = []
+    for g in cheat_db.get("games", []):
+        if code in _extract_serial_codes(g.get("serial", "")):
+            direct.append(g)
+    if direct:
+        return direct
+
+    if nointro_db is None:
+        return []
+    by_serial = nointro_db.get("by_serial", {}) or {}
+    crcs = {c.upper() for c in by_serial.get(code, [])}
+    if not crcs:
+        return []
+    bridged: List[dict] = []
+    for g in cheat_db.get("games", []):
+        if (g.get("crc32") or "").upper() in crcs:
+            bridged.append(g)
+    return bridged
+
+
+def search_games_by_title(cheat_db: dict, query: str, limit: int = 50) -> List[dict]:
+    """Return cheat DB games whose title contains all whitespace-separated
+    tokens of `query` (case-insensitive). Used by the title-search fallback.
+    """
+    tokens = [t for t in (query or "").lower().split() if t]
+    if not tokens:
+        return []
+    out: List[dict] = []
+    for g in cheat_db.get("games", []):
+        title = (g.get("title") or "").lower()
+        if all(t in title for t in tokens):
+            out.append(g)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def detect_app_patch_signature(data: bytes) -> Optional[int]:
+    """Detect whether `data` is a ROM already patched by this app.
+
+    Looks for the exact two-word jump that patch_rom() writes at every hook
+    site: `push r15` (0xE92D8000) followed by `ldr r15, [pc, #-4]` (0xE51FF004)
+    aligned to a 4-byte boundary. These two instructions in this exact order
+    are essentially never present in unmodified GBA ROMs but are guaranteed in
+    every ROM this app patches.
+
+    Returns the byte offset of the first signature found, or None if absent.
+    Stops at the first match — fast scan, no need to find all.
+    """
+    if len(data) < 8:
+        return None
+    needle = struct.pack("<II", 0xE92D8000, 0xE51FF004)
+    idx = data.find(needle)
+    if idx < 0:
+        return None
+    # Require 4-byte alignment to avoid false positives inside data tables.
+    while idx >= 0 and (idx % 4) != 0:
+        idx = data.find(needle, idx + 1)
+    return idx if idx >= 0 else None
+
+
 def patch_rom(
     rom_path: Path,
     out_path: Path,
